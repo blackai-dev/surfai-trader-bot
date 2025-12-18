@@ -35,6 +35,11 @@
   - 帳戶餘額與交易歷史。
   - **單元測試 (Unit Tests)**: 內建 `tests/test_dual_track.py` 確保核心風控邏輯正確無誤。
 
+### 5. 實戰運行截圖 (Live Execution)
+
+![Live Execution Demo](screenshot_demo.png)
+*圖：機器人於終端機監控多個幣種 (BTC/SOL/S) 的持倉狀態，即時計算 PnL 與動態止損位。*
+
 ---
 
 ## 🛡️ 雙軌制風控策略 (Dual-Track Risk Management) **[NEW]**
