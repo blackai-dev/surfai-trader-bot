@@ -1,4 +1,4 @@
-# 🤖 Orderly Network AI Trading Bot (AI 驅動多幣種交易機器人)
+# 🤖 SurfAI api ＋ Orderly Network DEX Trading Bot 
 
 這是一個基於 Python 的自動化交易機器人，**SurfAI api** + Orderly Network (<https://dex.orderly.network/dex>) 設計。
 它結合了 **SurfAI api** 的市場分析能力與 **Stateful Stepped Trailing Stop (狀態記憶階梯式移動止損)** 風控機制，能夠全天候自動執行交易並管理風險。
@@ -118,6 +118,21 @@ conda activate orderly_bot
 pip install -r requirements.txt
 ```
 
+### 1-C. 檢查既有 Docker 環境 (Optional)
+
+若您發現 Port 5432 已被佔用，或想確認既有的 PostgreSQL Container 是否符合需求，可使用以下指令檢查：
+
+```bash
+# 1. 查看正在執行的 Container 與 ID
+docker ps
+
+# 2. 檢查該 Container 的環境變數 (確認 User/Pass/DB 是否匹配)
+docker inspect --format='{{range .Config.Env}}{{println .}}{{end}}' <CONTAINER_ID_OR_NAME>
+
+# 3. 檢查資料掛載路徑 (確認資料存在哪裡)
+docker inspect --format='{{range .Mounts}}Source: {{.Source}} -> Destination: {{.Destination}}{{println}}{{end}}' <CONTAINER_ID_OR_NAME>
+```
+
 ### 2. 設定環境變數 (.env)
 
 複製 `.env.example` (若有) 或建立 `.env` 檔案，填入以下資訊：
@@ -160,25 +175,6 @@ chmod +x run.sh
 streamlit run dashboard.py
 ```
 
----
-
-### 1-C. 檢查既有 Docker 環境 (Optional)
-
-若您發現 Port 5432 已被佔用，或想確認既有的 PostgreSQL Container 是否符合需求，可使用以下指令檢查：
-
-```bash
-# 1. 查看正在執行的 Container 與 ID
-docker ps
-
-# 2. 檢查該 Container 的環境變數 (確認 User/Pass/DB 是否匹配)
-docker inspect --format='{{range .Config.Env}}{{println .}}{{end}}' <CONTAINER_ID_OR_NAME>
-
-# 3. 檢查資料掛載路徑 (確認資料存在哪裡)
-docker inspect --format='{{range .Mounts}}Source: {{.Source}} -> Destination: {{.Destination}}{{println}}{{end}}' <CONTAINER_ID_OR_NAME>
-```
-
----
-
 ## ⚠️ 重要機制說明
 
 ### Orderbook 解析與備援
@@ -195,7 +191,7 @@ docker inspect --format='{{range .Mounts}}Source: {{.Source}} -> Destination: {{
 
 ## 🤝 貢獻 (Contributing)
 
-歡迎提交 Issues 或 Pull Requests 來改進策略或修復 Bug。
+歡迎 Pull Requests 來改進策略或修復 Bug。
 
 ## 📜 授權 (License)
 
