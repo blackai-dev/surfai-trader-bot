@@ -403,15 +403,22 @@ class DatabaseHandler:
         if not self.conn: return None, None
         try:
             with self.conn.cursor() as cur:
+                # Optimized query: Prefer timestamp, fallback to ID for sequence
                 cur.execute("""
-                    SELECT exit_timestamp, status FROM trade_logs 
-                    WHERE symbol = %s AND status LIKE 'CLOSED%%'
-                    ORDER BY exit_timestamp DESC NULLS LAST, id DESC
+                    SELECT COALESCE(exit_timestamp, timestamp), status 
+                    FROM trade_logs 
+                    WHERE symbol = %s AND status LIKE 'CLOSED%'
+                    ORDER BY COALESCE(exit_timestamp, timestamp) DESC, id DESC
                     LIMIT 1;
                 """, (symbol,))
                 row = cur.fetchone()
                 if row:
-                    return row[0], row[1]
+                    ts = row[0]
+                    # Ensure it's not None
+                    if ts:
+                        print(f"DEBUG: get_last_exit_info for {symbol}: Found exit at {ts} with status {row[1]}")
+                        return ts, row[1]
+                print(f"DEBUG: get_last_exit_info for {symbol}: No closed trade found.")
                 return None, None
         except Exception as e:
             print(f"❌ Failed to fetch last exit info: {e}")

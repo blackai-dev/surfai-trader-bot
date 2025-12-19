@@ -168,10 +168,13 @@ def run_bot():
                                     side = "SELL" if qty > 0 else "BUY"
                                     
                                     print(f"🚨 Panic Closing {sym} ({qty})...")
-                                    exec_mod.close_position(sym, abs(qty), side)
+                                    resp, exit_price = exec_mod.close_position(sym, abs(qty), side)
+                                    
+                                    # Log exit immediately so cooldown works
+                                    db.close_zombie_trade(sym, exit_price)
                                     count += 1
                                     
-                                notifier.send_message(f"✅ **Panic Complete**: Closed {count} positions.")
+                                notifier.send_message(f"✅ **Panic Complete**: Closed {count} positions and logged exits.")
                     except Exception as e:
                         print(f"❌ Panic Close Failed: {e}")
                         notifier.send_message(f"❌ **Panic Failed**: {e}")
@@ -269,14 +272,13 @@ def run_bot():
                             
                             diff = curr_candle_idx - last_candle_idx
                             if diff < config.REENTRY_COOLDOWN_CANDLES:
-                                print(f"🧊 Cooldown Active for {symbol} (Last Exit: {last_exit_ts.strftime('%H:%M')}). Skipping analysis.")
-                                # Still update timer to avoid tight loop checks? No, let it check next interval.
-                                # Actually, if we skip, we don't update last_time, so it checks every POLL? 
-                                # Better to sleep or just update last_time?
-                                # Ideally we shouldn't spam DB. Let's update last_time so we check again in 5 mins.
+                                # Provide more detail in console
+                                print(f"🧊 Cooldown Active for {symbol} | Diff: {diff} candles < {config.REENTRY_COOLDOWN_CANDLES} | Last Exit: {last_exit_ts.strftime('%H:%M')} | Reason: {last_exit_reason}")
                                 analysis_timers[symbol] = current_time
                                 time.sleep(1)
                                 continue
+                            else:
+                                print(f"✅ Cooldown Expired for {symbol} (Diff: {diff})")
                             
                             # Prepare context for AI if recent (e.g. < 4 hours)
                             if diff < 16: # 4 hours = 16 candles

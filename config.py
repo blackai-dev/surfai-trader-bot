@@ -58,3 +58,8 @@ TS_DYNAMIC_CALLBACK = 0.015 # 1.5% trailing distance once Tier 2 is hit
 
 # Stale Position Re-evaluation
 MAX_HOLD_HOURS = 12     # Hours before AI re-evaluates a stagnant trade
+
+# Re-entry Cooldown (Discipline)
+# Prevents entering on the same candle after a loss (Timeframe Mismatch Fix)
+REENTRY_COOLDOWN_CANDLES = 3
+
