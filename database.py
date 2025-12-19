@@ -48,6 +48,7 @@ class DatabaseHandler:
                 try:
                     cur.execute("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS log_id TEXT UNIQUE;")
                     cur.execute("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS highest_price FLOAT DEFAULT 0;")
+                    cur.execute("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS exit_timestamp TIMESTAMPTZ;")
                 except Exception as e:
                     print(f"Migration note: {e}")
 
@@ -220,7 +221,7 @@ class DatabaseHandler:
                     log_id = row[0]
                     cur.execute("""
                         UPDATE trade_logs 
-                        SET exit_price = %s, pnl = %s, status = %s
+                        SET exit_price = %s, pnl = %s, status = %s, exit_timestamp = NOW()
                         WHERE id = %s;
                     """, (exit_price, pnl, status, log_id))
                     print(f"📝 PnL Logged to DB for ID {log_id}: {pnl:.4f}")
@@ -277,7 +278,7 @@ class DatabaseHandler:
                 # 2. Update
                 cur.execute("""
                     UPDATE trade_logs 
-                    SET status = 'CLOSED_MANUAL', exit_price = %s, pnl = %s
+                    SET status = 'CLOSED_MANUAL', exit_price = %s, pnl = %s, exit_timestamp = NOW()
                     WHERE id = %s;
                 """, (exit_price, pnl, log_id))
                 
@@ -393,3 +394,25 @@ class DatabaseHandler:
         except Exception as e:
             print(f"❌ Failed to fetch PnL history: {e}")
             return []
+
+    def get_last_exit_info(self, symbol):
+        """
+        Returns (exit_timestamp, status/reason) of the last closed trade.
+        Useful for preventing immediate re-entry (Cooldown).
+        """
+        if not self.conn: return None, None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT exit_timestamp, status FROM trade_logs 
+                    WHERE symbol = %s AND status LIKE 'CLOSED%%'
+                    ORDER BY exit_timestamp DESC NULLS LAST, id DESC
+                    LIMIT 1;
+                """, (symbol,))
+                row = cur.fetchone()
+                if row:
+                    return row[0], row[1]
+                return None, None
+        except Exception as e:
+            print(f"❌ Failed to fetch last exit info: {e}")
+            return None, None

@@ -255,6 +255,33 @@ def run_bot():
                         continue
                         
                     if current_time - last_time >= config.INTERVAL:
+                        # --- Cooldown Check (Mechanical Layer) ---
+                        last_exit_ts, last_exit_reason = db.get_last_exit_info(symbol)
+                        current_exit_context = None
+                        
+                        if last_exit_ts:
+                            # Convert to timestamp
+                            ts_val = last_exit_ts.timestamp()
+                            CANDLE_SECONDS = 900 # 15m
+                            
+                            last_candle_idx = int(ts_val // CANDLE_SECONDS)
+                            curr_candle_idx = int(current_time // CANDLE_SECONDS)
+                            
+                            diff = curr_candle_idx - last_candle_idx
+                            if diff < config.REENTRY_COOLDOWN_CANDLES:
+                                print(f"🧊 Cooldown Active for {symbol} (Last Exit: {last_exit_ts.strftime('%H:%M')}). Skipping analysis.")
+                                # Still update timer to avoid tight loop checks? No, let it check next interval.
+                                # Actually, if we skip, we don't update last_time, so it checks every POLL? 
+                                # Better to sleep or just update last_time?
+                                # Ideally we shouldn't spam DB. Let's update last_time so we check again in 5 mins.
+                                analysis_timers[symbol] = current_time
+                                time.sleep(1)
+                                continue
+                            
+                            # Prepare context for AI if recent (e.g. < 4 hours)
+                            if diff < 16: # 4 hours = 16 candles
+                                current_exit_context = {'time': last_exit_ts, 'reason': last_exit_reason, 'candles_ago': diff}
+
                         print(f"👉 Analyzing {symbol} (Rank #{rank})...")
                         
                         # Fetch 100 candles
@@ -270,7 +297,7 @@ def run_bot():
                             print(f"📊 {symbol} Indicators: Price={inds['current_price']}, MA60={inds['MA_LONG']}")
                             
                             print(f"🧠 Asking AI for {symbol}...")
-                            signal = ai.analyze_market(candles_15m, indicators=inds)
+                            signal = ai.analyze_market(symbol, candles_15m, indicators=inds, last_exit=current_exit_context)
                             
                             if signal:
                                 # Inject Entry Price for Execution Logic

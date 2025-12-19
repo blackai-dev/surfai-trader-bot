@@ -65,11 +65,11 @@ class AIAnalyst:
                 time.sleep(1)
         return "HOLD"
 
-    def analyze_market(self, candles, indicators=None):
+    def analyze_market(self, symbol, candles, indicators=None, last_exit=None):
         """
         Sends market data to Surf AI and returns a trading signal.
         """
-        prompt = self._create_prompt(candles, indicators)
+        prompt = self._create_prompt(symbol, candles, indicators, last_exit)
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -129,7 +129,7 @@ class AIAnalyst:
         print("❌ AI Analysis failed after retries.")
         return None
 
-    def _create_prompt(self, candles, indicators):
+    def _create_prompt(self, symbol, candles, indicators, last_exit=None):
         data_str = "Timestamp | Open | High | Low | Close | Volume\n"
         # Only show last 20 candles for prompt brevity, even if we fetched 100
         display_candles = candles[-20:]
@@ -147,9 +147,23 @@ class AIAnalyst:
                 f"- Current Price: {indicators.get('current_price')}\n"
             )
 
+        exit_context = ""
+        if last_exit:
+            reason = last_exit.get('reason', 'UNKNOWN')
+            ago = last_exit.get('candles_ago', 0)
+            exit_context = (
+                f"\n[CRITICAL CONTEXT] RECENT EXIT DETECTED: {ago} candles ago via {reason}.\n"
+                f"Psychological Discipline: You are forbidden from 'revenge trading'. Do NOT attempt to 'get back' the loss.\n"
+                f"Strict Re-entry Rule: You may ONLY signal BUY/SELL if the primary reason for the previous exit has been "
+                f"completely invalidated by definitive new Price Action. If the price is still chopping around the previous "
+                f"exit level, or if the trend remains uncertain, you MUST signal HOLD. Only re-enter if this is a "
+                f"superior, high-confidence setup where the trend has clearly reversed or stabilized.\n"
+            )
+
         return (
-            f"Analyze the following ETH-PERP 15m candle data for a short-term trade.\n"
+            f"Analyze the following {symbol} 15m candle data for a short-term trade.\n"
             f"{ma_context}\n"
+            f"{exit_context}\n"
             f"{data_str}\n\n"
             f"Instructions:\n"
             f"1. **Trend Filter**: Use MAs to determine trend. If MA{config.MA_SHORT} < MA{config.MA_MEDIUM} < MA{config.MA_LONG}, it is a Strong Downtrend.\n"
