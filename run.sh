@@ -8,7 +8,6 @@ while true; do
     echo "=========================================="
     
     # Initialize Conda for shell script
-    source /home/vincent/miniconda3/etc/profile.d/conda.sh
     conda activate orderly_trading_bot
     
     # Run the bot

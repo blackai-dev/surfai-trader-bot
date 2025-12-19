@@ -92,7 +92,7 @@ class TestDualTrackStrategy(unittest.TestCase):
         self.exec_engine.close_position.return_value = ({'success': True}, current_price)
 
         # Run
-        self.exec_engine.check_stale_positions(positions, self.mock_md, self.mock_ai)
+        self.exec_engine.audit_positions(positions, self.mock_md, self.mock_ai)
         
         # Assert
         self.mock_ai.evaluate_stale_position.assert_called()
@@ -115,7 +115,7 @@ class TestDualTrackStrategy(unittest.TestCase):
             'mark_price': current_price
         }]
         
-        self.exec_engine.check_stale_positions(positions, self.mock_md, self.mock_ai)
+        self.exec_engine.audit_positions(positions, self.mock_md, self.mock_ai)
         
         # Assert
         self.mock_ai.evaluate_stale_position.assert_not_called()

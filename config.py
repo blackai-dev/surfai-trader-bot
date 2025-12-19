@@ -5,7 +5,7 @@ load_dotenv()
 
 # Trading Config
 SYMBOL = "PERP_ETH_USDC" # Default Symbol
-ENABLE_TOP_10 = False    # Disable by default for safety
+ENABLE_TOP_10 = True     # Disable by default for safety, Enable scan multi tokens
 MAX_OPEN_POSITIONS = 3 
 
 # Position Sizing
@@ -22,6 +22,10 @@ if ORDERLY_SECRET and not ORDERLY_SECRET.startswith("ed25519:"):
 
 ORDERLY_ACCOUNT_ID = os.getenv("ORDERLY_ACCOUNT_ID")
 ASKSURF_API_KEY = os.getenv("ASKSURF_API_KEY")
+
+# Telegram Config
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # DB Config
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -46,7 +50,7 @@ MA_LONG = 60
 TS_ACTIVATION_1 = 0.015 # 1.5% profit triggers Tier 1
 TS_LOCK_1 = 0.002       # Lock 0.2% profit (Cover Fees) - Was 0.0 (Breakeven)
 
-TS_ACTIVATION_2 = 0.030 # 3.0% profit triggers Tier 2
+TS_ACTIVATION_2 = 0.025 # 2.5% profit triggers Tier 2 
 TS_LOCK_2 = 0.015       # Lock 1.5% profit
 
 # Dynamic Ratchet (Tier 2 Upgrade)

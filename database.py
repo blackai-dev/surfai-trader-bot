@@ -50,7 +50,36 @@ class DatabaseHandler:
                     cur.execute("ALTER TABLE trade_logs ADD COLUMN IF NOT EXISTS highest_price FLOAT DEFAULT 0;")
                 except Exception as e:
                     print(f"Migration note: {e}")
-            print("Verified trade_logs table.")
+
+                # Create Bot Configs Table (Key-Value Store)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS bot_configs (
+                        key TEXT PRIMARY KEY,
+                        value TEXT,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+                # Insert Default Configs if not exist
+                cur.execute("""
+                    INSERT INTO bot_configs (key, value) VALUES 
+                    ('is_paused', 'false'),
+                    ('position_size', '30.0')
+                    ON CONFLICT (key) DO NOTHING;
+                """)
+
+                # Create Command Queue Table (Phase 2)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS command_queue (
+                        id SERIAL PRIMARY KEY,
+                        command TEXT NOT NULL,
+                        params JSONB DEFAULT '{}'::jsonb,
+                        status TEXT DEFAULT 'PENDING',
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        executed_at TIMESTAMPTZ
+                    );
+                """)
+
+            print("Verified trade_logs and bot_configs tables.")
         except Exception as e:
             print(f"❌ Failed to init DB schema: {e}")
 
@@ -125,6 +154,29 @@ class DatabaseHandler:
         except Exception as e:
             print(f"❌ DB Read Error: {e}")
             return None, 0, 0, None
+
+    def get_active_trade_details(self, symbol):
+        """
+        Returns full details for Status Display: 
+        (entry_price, highest_price, ai_action, timestamp)
+        """
+        if not self.conn: return None, 0, 0, None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT entry_price, highest_price, ai_action, timestamp 
+                    FROM trade_logs 
+                    WHERE symbol = %s AND status = 'OPEN' 
+                    ORDER BY id DESC LIMIT 1;
+                """, (symbol,))
+                row = cur.fetchone()
+                if row:
+                    # entry, highest, action, ts
+                    return float(row[0] or 0), float(row[1] or 0), row[2], row[3]
+                return 0, 0, None, None
+        except Exception as e:
+            print(f"❌ DB Read Error (Status): {e}")
+            return 0, 0, None, None
 
     def update_highest_price(self, log_id, price):
         if not self.conn: return
@@ -234,3 +286,110 @@ class DatabaseHandler:
                 
         except Exception as e:
             print(f"❌ Failed to close zombie trade: {e}")
+
+    def get_config(self, key, default=None):
+        """Fetches a dynamic config value from DB."""
+        if not self.conn: return default
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT value FROM bot_configs WHERE key = %s", (key,))
+                row = cur.fetchone()
+                return row[0] if row else default
+        except Exception as e:
+            print(f"❌ DB Config Read Error ({key}): {e}")
+            return default
+
+    def set_config(self, key, value):
+        """Sets a dynamic config value in DB."""
+        if not self.conn: return False
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bot_configs (key, value, updated_at) 
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+                """, (key, str(value)))
+                print(f"⚙️ Config Updated: {key} = {value}")
+                return True
+        except Exception as e:
+            print(f"❌ DB Config Write Error ({key}): {e}")
+            return False
+
+    # --- Command Queue Methods (Phase 2) ---
+
+    def add_command(self, command, params=None):
+        """Adds a command to the queue (e.g. CLOSE_POSITION)"""
+        if not self.conn: return False
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO command_queue (command, params, status)
+                    VALUES (%s, %s, 'PENDING');
+                """, (command, Json(params) if params else '{}'))
+            print(f"📥 Command Queued: {command} {params}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to queue command: {e}")
+            return False
+
+    def get_pending_commands(self):
+        """Fetches all PENDING commands."""
+        if not self.conn: return []
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, command, params FROM command_queue
+                    WHERE status = 'PENDING'
+                    ORDER BY id ASC;
+                """)
+                return cur.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to fetch commands: {e}")
+            return []
+
+    def mark_command_completed(self, cmd_id):
+        """Marks a command as EXECUTED."""
+        if not self.conn: return
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE command_queue 
+                    SET status = 'EXECUTED', executed_at = NOW()
+                    WHERE id = %s;
+                """, (cmd_id,))
+        except Exception as e:
+            print(f"❌ Failed to mark command {cmd_id} complete: {e}")
+
+    # --- Reporting Methods (Phase 2) ---
+
+    def get_recent_signals(self, limit=5):
+        """Fetches recent AI signals."""
+        if not self.conn: return []
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT symbol, ai_action, ai_confidence, timestamp, ai_reasoning 
+                    FROM trade_logs 
+                    WHERE status = 'SIGNAL_GENERATED'
+                    ORDER BY id DESC LIMIT %s;
+                """, (limit,))
+                return cur.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to fetch signals: {e}")
+            return []
+
+    def get_pnl_history(self, limit=50):
+        """Fetches closed trades for PnL plotting."""
+        if not self.conn: return []
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT timestamp, pnl FROM trade_logs 
+                    WHERE status IN ('CLOSED', 'CLOSED_TP', 'CLOSED_SL', 'CLOSED_MANUAL', 'CLOSED_AI_STALE')
+                    AND pnl IS NOT NULL
+                    ORDER BY timestamp ASC;
+                """)
+                return cur.fetchall()
+        except Exception as e:
+            print(f"❌ Failed to fetch PnL history: {e}")
+            return []

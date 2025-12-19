@@ -30,6 +30,11 @@ class Execution:
 
 
     def execute_trade(self, signal, symbol):
+        # NEW: Init Notifier locally to avoid passing it everywhere (or pass in init)
+        # Ideally, pass in __init__, but for minimal diff we import here or use passed client
+        from notifier import TelegramNotifier
+        notifier = TelegramNotifier()
+        
         try:
             action = signal.get('action')
             entry_price = float(signal.get('entry_price', 0))
@@ -122,6 +127,14 @@ class Execution:
 
                 print(f"✅ Trade executed: {action} {order_quantity} {symbol} @ {executed_price}")
                 
+                # Notify Trade
+                notifier.send_message(
+                    f"🚀 **Order Executed**\n"
+                    f"{side} {order_quantity} `{symbol}`\n"
+                    f"Price: {executed_price}\n"
+                    f"Val: {order_quantity * executed_price:.2f} USDC"
+                )
+
                 # DB Logging
                 if self.db and signal.get('log_id'):
                     self.db.log_trade(signal.get('log_id'), executed_price, "OPEN")
@@ -130,6 +143,7 @@ class Execution:
                 return response
             else:
                 print(f"❌ Order failed or not successful: {response}")
+                notifier.send_message(f"⚠️ **Order Failed**: {symbol}\nResponse: {response}")
                 return None
             
         except Exception as e:
@@ -137,6 +151,9 @@ class Execution:
             return None
 
     def close_position(self, symbol, quantity, side):
+        from notifier import TelegramNotifier
+        notifier = TelegramNotifier()
+        
         """
         Closes a position by placing an opposing market order.
         """
@@ -173,9 +190,13 @@ class Execution:
             return response, executed_price
         except Exception as e:
             print(f"❌ Close failed: {e}")
+            notifier.send_message(f"⚠️ **Close Failed**: {symbol}\nError: {e}")
             return None, 0
 
     def monitor_risks(self, positions, md):
+        from notifier import TelegramNotifier
+        notifier = TelegramNotifier()
+        
         """
         Checks open positions against TP/SL thresholds.
         supports multi-token monitoring.
@@ -301,6 +322,9 @@ class Execution:
                         final_price = exit_price if exit_price > 0 else current_price
                         pnl_amount = (final_price - avg_price) * abs_qty
                         self.db.log_pnl(symbol, final_price, pnl_amount, "CLOSED_TP")
+                    
+                    # Notify
+                    notifier.send_message(f"💰 **Take Profit**\n`{symbol}` LONG Closed.\nPnL: {pnl_amount:.2f} USDC")
                         
                 elif current_price <= effective_sl:
                     print(f"🛑 SL Triggered ({sl_type}) for LONG {symbol}: Price {current_price} <= {effective_sl}")
@@ -309,6 +333,9 @@ class Execution:
                         final_price = exit_price if exit_price > 0 else current_price
                         pnl_amount = (final_price - avg_price) * abs_qty
                         self.db.log_pnl(symbol, final_price, pnl_amount, "CLOSED_SL")
+                    
+                    # Notify
+                    notifier.send_message(f"🛑 **Stop Loss ({sl_type})**\n`{symbol}` LONG Closed.\nPnL: {pnl_amount:.2f} USDC")
                     
             else:
                 # SHORT: TP < Entry, SL > Entry
@@ -368,7 +395,10 @@ class Execution:
                         final_price = exit_price if exit_price > 0 else current_price
                         pnl_amount = (avg_price - final_price) * abs_qty
                         self.db.log_pnl(symbol, final_price, pnl_amount, "CLOSED_TP")
-
+                    
+                    # Notify
+                    notifier.send_message(f"💰 **Take Profit**\n`{symbol}` SHORT Closed.\nPnL: {pnl_amount:.2f} USDC")
+                        
                 elif current_price >= effective_sl:
                     print(f"🛑 SL Triggered ({sl_type}) for SHORT {symbol}: Price {current_price} >= {effective_sl}")
                     _, exit_price = self.close_position(symbol, abs_qty, "BUY")
@@ -376,11 +406,18 @@ class Execution:
                         final_price = exit_price if exit_price > 0 else current_price
                         pnl_amount = (avg_price - final_price) * abs_qty
                         self.db.log_pnl(symbol, final_price, pnl_amount, "CLOSED_SL")
+                    
+                    # Notify
+                    notifier.send_message(f"🛑 **Stop Loss ({sl_type})**\n`{symbol}` SHORT Closed.\nPnL: {pnl_amount:.2f} USDC")
 
-    def check_stale_positions(self, positions, md, ai):
+    def audit_positions(self, positions, md, ai, force=False):
+        from notifier import TelegramNotifier
+        notifier = TelegramNotifier()
+        
         """
-        Iterates through active positions and asks AI to review 'stale' ones.
-        Stale = Held > MAX_HOLD_HOURS and NOT in high-profit zone.
+        Iterates through active positions and asks AI to review them.
+        If force=True, audits ALL positions regardless of time/pnl.
+        If force=False, only audits 'stale' ones (Held > MAX_HOURS & Low PnL).
         """
         if not self.db or not ai: return
         
@@ -394,11 +431,13 @@ class Execution:
             # Fetch State
             log_id, hwm_price, db_entry, entry_time = self.db.get_open_trade_state(symbol)
             
+            # If no entry time in DB, we can't calc age, but if force=True we might still want to check?
+            # For now, if no DB entry, we skip unless we just assume 0 age.
             if not entry_time:
-                continue # Can't calculate age
+                # continue 
+                entry_time = current_time_dt # Fallback to now (0 age)
             
             # Robust Timezone Handling
-            # Ensure both are offset-naive (Local/UTC) to allow subtraction
             if entry_time.tzinfo:
                 entry_time = entry_time.replace(tzinfo=None)
             
@@ -406,40 +445,51 @@ class Execution:
             age = current_time_dt - entry_time
             hours_held = age.total_seconds() / 3600
             
-            if hours_held > config.MAX_HOLD_HOURS:
-                # Determine PnL
-                mark_price = pos.get('mark_price', 0)
-                if not mark_price:
-                     # Try fallback
-                     candles = md.get_ohlcv(symbol, timeframe="1m", limit=1)
-                     if candles: mark_price = float(candles[-1]['close'])
-                
-                if not mark_price: continue
+            # Get Prices
+            mark_price = pos.get('mark_price', 0)
+            if not mark_price:
+                 candles = md.get_ohlcv(symbol, timeframe="1m", limit=1)
+                 if candles: mark_price = float(candles[-1]['close'])
+            
+            if not mark_price: continue
 
-                avg_price = float(pos.get('average_open_price', 0))
-                if qty > 0: # LONG
-                    pnl_pct = (mark_price - avg_price) / avg_price
-                else: # SHORT
-                    pnl_pct = (avg_price - mark_price) / avg_price
+            avg_price = float(pos.get('average_open_price', 0))
+            if qty > 0: # LONG
+                pnl_pct = (mark_price - avg_price) / avg_price
+            else: # SHORT
+                pnl_pct = (avg_price - mark_price) / avg_price
+            
+            # LOGIC: Should we audit?
+            should_audit = False
+            audit_reason = "Stale"
+            
+            if force:
+                should_audit = True
+                audit_reason = "Manual Force"
+            elif hours_held > config.MAX_HOLD_HOURS and pnl_pct < config.TS_ACTIVATION_2:
+                should_audit = True
+                audit_reason = "Stale & Low PnL"
+            
+            if should_audit:
+                print(f"🧠 Auditing {symbol} ({audit_reason}, Held {hours_held:.1f}h, PnL {pnl_pct*100:.2f}%)... Asking AI.")
                 
-                # Filter: Only check if NOT in Tier 2 Profit (If it's mooning, let Ratchet handle it)
-                if pnl_pct < config.TS_ACTIVATION_2:
-                    print(f"🕰️ Stale Check for {symbol} (Held {hours_held:.1f}h, PnL {pnl_pct*100:.2f}%)... Asking AI.")
+                # Fetch Candles for Context
+                candles_ctx = md.get_ohlcv(symbol, timeframe="15m", limit=20)
+                if not candles_ctx: continue
+                
+                decision = ai.evaluate_stale_position(symbol, pnl_pct, hours_held, candles_ctx)
+                
+                if decision == "CLOSE":
+                    print(f"🛑 AI Decided to CLOSE {symbol} (Reason: Trend Invalidated)")
+                    side = "SELL" if qty > 0 else "BUY"
+                    _, exit_price = self.close_position(symbol, abs(qty), side)
+                    if self.db:
+                        final_price = exit_price if exit_price > 0 else mark_price
+                        pnl_val = (final_price - avg_price) * qty if qty > 0 else (avg_price - final_price) * abs(qty)
+                        self.db.log_pnl(symbol, final_price, pnl_val, "CLOSED_AI_AUDIT")
                     
-                    # Fetch Candles for Context
-                    candles_ctx = md.get_ohlcv(symbol, timeframe="15m", limit=20)
-                    if not candles_ctx: continue
-                    
-                    decision = ai.evaluate_stale_position(symbol, pnl_pct, hours_held, candles_ctx)
-                    
-                    if decision == "CLOSE":
-                        print(f"🛑 AI Decided to CLOSE Stale Position {symbol} (Reason: Trend Invalidated)")
-                        side = "SELL" if qty > 0 else "BUY"
-                        _, exit_price = self.close_position(symbol, abs(qty), side)
-                        if self.db:
-                            final_price = exit_price if exit_price > 0 else mark_price
-                            pnl_val = (final_price - avg_price) * qty if qty > 0 else (avg_price - final_price) * abs(qty)
-                            self.db.log_pnl(symbol, final_price, pnl_val, "CLOSED_AI_STALE")
-                    else:
-                         print(f"🧘 AI Decided to HOLD Stale Position {symbol}.")
-
+                    notifier.send_message(f"🧠 **AI Close ({audit_reason})**\n`{symbol}` held for {hours_held:.1f}h.\nTrend Invalidated.")
+                else:
+                     print(f"🧘 AI Decided to HOLD {symbol}.")
+                     if force:
+                         notifier.send_message(f"🧠 **AI Audit Result**\n`{symbol}`: **HOLD**\n_(Trend still valid)_")

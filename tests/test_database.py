@@ -5,7 +5,7 @@ import os
 import datetime
 
 # Add parent dir
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import DatabaseHandler
 
@@ -57,7 +57,27 @@ class TestDatabase(unittest.TestCase):
         self.assertIsNone(log_id)
         self.assertEqual(hwm, 0)
         self.assertEqual(time, None)
+        self.assertEqual(time, None)
         print("\n✅ Test Passed: get_open_trade_state returns default Tuple on empty")
+
+    def test_get_active_trade_details(self):
+        # Setup Mock for detailed status
+        # entry_price, highest_price, ai_action, timestamp
+        now = datetime.datetime.now()
+        self.mock_cursor.fetchone.return_value = (87366.0, 88000.0, 'SELL', now)
+        
+        entry, highest, action, ts = self.db.get_active_trade_details('PERP_BTC_USDC')
+        
+        self.assertEqual(entry, 87366.0)
+        self.assertEqual(highest, 88000.0)
+        self.assertEqual(action, 'SELL')
+        self.assertEqual(ts, now)
+        
+         # Verify SQL query structure
+        call_args = self.mock_cursor.execute.call_args
+        sql = call_args[0][0]
+        self.assertIn("SELECT entry_price, highest_price, ai_action", sql)
+        print("\n✅ Test Passed: get_active_trade_details returns enrich data correctly")
 
     def test_update_entry_price(self):
         log_id = 'log_999'

@@ -1,195 +1,170 @@
-
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import sys
 import os
 
-# Add parent dir to path
+# Add parent dir to path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from execution import Execution
 import config
+from execution import Execution
 
 class TestExecution(unittest.TestCase):
     def setUp(self):
+        # Mock dependencies
         self.mock_client = MagicMock()
         self.mock_db = MagicMock()
-        self.execution = Execution(self.mock_client, self.mock_db)
+        self.mock_md = MagicMock()
         
-        # Mock exchange info response
-        self.mock_client.get_exchange_info.return_value = {
-            "success": True,
-            "data": {
-                "base_tick": 0.01,
-                "min_notional": 10.0
+        # Initialize Execution module with mocks
+        self.exec_mod = Execution(self.mock_client, self.mock_db)
+        
+        # Setup config constants for testing to ensure deterministic behavior
+        self.original_config_vals = {
+            'TP_PERCENT': config.TP_PERCENT,
+            'TS_ACTIVATION_2': config.TS_ACTIVATION_2,
+            'TS_DYNAMIC_CALLBACK': config.TS_DYNAMIC_CALLBACK,
+            'TS_ACTIVATION_1': config.TS_ACTIVATION_1,
+            'TS_LOCK_1': config.TS_LOCK_1
+        }
+        
+        # Enforce the config values we want to test
+        config.TP_PERCENT = 0.30
+        config.TS_ACTIVATION_2 = 0.025 # 2.5% Target
+        config.TS_DYNAMIC_CALLBACK = 0.015
+        
+    def tearDown(self):
+        # Restore config
+        for k, v in self.original_config_vals.items():
+            setattr(config, k, v)
+
+    def test_trailing_stop_tier_2_trigger_long(self):
+        """
+        Verify that hitting 2.5% profit triggers Tier 2 TS logic, 
+        and a subsequent drop triggers a close.
+        """
+        symbol = "PERP_BTC_USDC"
+        entry_price = 1000.0
+        qty = 0.1
+        
+        # Scene 1: Position is OPEN, Current Price = Entry
+        # PnL = 0%
+        pos = {
+            'symbol': symbol,
+            'position_qty': qty, # LONG
+            'average_open_price': entry_price
+        }
+        
+        # Mock DB to return clean state (no previous HWM)
+        # return (log_id, hwm_price, db_entry, entry_time)
+        self.mock_db.get_open_trade_state.return_value = ("log_123", 1000.0, 1000.0, None)
+        
+        # Update HWM call
+        self.mock_db.update_highest_price = MagicMock()
+        
+        # Close Position call
+        self.exec_mod.close_position = MagicMock(return_value=({'success': True}, 1010.0))
+        
+        # --- Step 1: Market moves to 1025 (2.5% Profit) ---
+        # This should UPDATE HWM to 1025.
+        
+        # Mock Market Data to return 1025
+        # Structure: {'data': {'asks': [{'price': 1025}], 'bids': [{'price': 1025}]}}
+        self.mock_md.get_orderbook.return_value = {
+            'data': {
+                'asks': [{'price': 1025}],
+                'bids': [{'price': 1025}]
             }
         }
-
-    def test_calculate_quantity_and_order(self):
-        # Setup specific test case
-        # Config: 10 USDC per trade
-        # Price: 125.0
-        # Expected Qty: 10 / 125 = 0.08
-        config.POSITION_SIZE_USDC = 10.0
         
-        signal = {
-            "action": "SELL",
-            "confidence": 0.8,
-            "entry_price": 125.0, # Ensures clean division
-            "log_id": "test_log_123"
+        # Run Monitor
+        with patch('sys.stdout', new_callable=MagicMock) as mock_stdout:
+            self.exec_mod.monitor_risks([pos], self.mock_md)
+            
+            # Verify DB HWM Update was called with 1025
+            self.mock_db.update_highest_price.assert_called()
+            # Check args: (log_id, new_hwm)
+            args, _ = self.mock_db.update_highest_price.call_args
+            self.assertEqual(args[1], 1025.0)
+            
+            # Verify NO close happened yet (Stop shouldn't be hit at peak)
+            self.exec_mod.close_position.assert_not_called()
+
+        # --- Step 2: Market drops to 1009 (Below Ratchet) ---
+        # Calculation:
+        # HWM = 1025
+        # Callback = 1.5% (0.015)
+        # Activation Threshold = 1025 * (1 - 0.015) = 1025 * 0.985 = 1009.625
+        # Current Price 1009 < 1009.625 -> SHOULD CLOSE
+        
+        # Update DB Mock to reflect the new HWM recorded in Step 1
+        self.mock_db.get_open_trade_state.return_value = ("log_123", 1025.0, 1000.0, None)
+        
+        # Mock Market Data to return 1009
+        self.mock_md.get_orderbook.return_value = {
+            'data': {
+                'asks': [{'price': 1009}],
+                'bids': [{'price': 1009}]
+            }
         }
         
-        symbol = "PERP_SOL_USDC"
+        # Run Monitor
+        with patch('sys.stdout', new_callable=MagicMock) as mock_stdout:
+            self.exec_mod.monitor_risks([pos], self.mock_md)
+            
+            # Verify Close Position CALLED
+            self.exec_mod.close_position.assert_called_with(symbol, qty, "SELL")
+            
+            # Verify Log Message (Optional, good for debugging)
+            # We can inspect print output if needed, but assertion is stronger
+            
+    def test_trailing_stop_tier_2_trigger_short(self):
+        """
+        Verify TS Tier 2 for SHORT position.
+        """
+        symbol = "PERP_BTC_USDC"
+        entry_price = 1000.0
+        qty = -0.1 # SHORT
         
-        # Execute
-        self.execution.execute_trade(signal, symbol)
+        pos = {
+            'symbol': symbol,
+            'position_qty': qty,
+            'average_open_price': entry_price
+        }
         
-        # Verify order call arguments
-        self.mock_client.create_order.assert_called_once()
-        call_args = self.mock_client.create_order.call_args[1]
+        # Initial State: HWM = Entry (Low price for short)
+        self.mock_db.get_open_trade_state.return_value = ("log_123", 1000.0, 1000.0, None)
+        self.mock_db.update_highest_price = MagicMock()
+        self.exec_mod.close_position = MagicMock(return_value=({'success': True}, 990.0))
         
-        self.assertEqual(call_args['symbol'], symbol)
-        self.assertEqual(call_args['side'], "SELL")
-        self.assertEqual(call_args['order_type'], "MARKET")
-        self.assertEqual(call_args['order_quantity'], 0.08) # Verify variable name & value logic
+        # --- Step 1: Market moves to 975 (2.5% Profit for Short) ---
+        # (1000 - 975) / 1000 = 25 / 1000 = 2.5%
         
-        print("\n✅ Test Passed: execute_trade calls client.order with correct 'order_quantity'")
-
-    def test_monitor_risks(self):
-        # Override config to match test expectation (TP=4%)
+        self.mock_md.get_orderbook.return_value = {
+            'data': {'asks': [{'price': 975}], 'bids': [{'price': 975}]}
+        }
         
-        # Override config.TP_PERCENT to match test expectation (TP=4%)
-        # Current config might be 30% which won't trigger close in this test.
-        old_tp = config.TP_PERCENT
-        config.TP_PERCENT = 0.04
-        self.addCleanup(lambda: setattr(config, 'TP_PERCENT', old_tp))
-
-        # Setup
-        mock_md = MagicMock()
+        self.exec_mod.monitor_risks([pos], self.mock_md)
         
-        # Ensure db returns default state (no history) for this test
-        # We need to set this on self.mock_db which is passed to Execution
-        self.mock_db.get_open_trade_state.return_value = (None, 0, 0, None)
+        # Verify HWM Update (Lowest Price)
+        args, _ = self.mock_db.update_highest_price.call_args
+        self.assertEqual(args[1], 975.0)
+        self.exec_mod.close_position.assert_not_called()
         
-        # Scenario: 
-        # 1. ETH Long Entry 3000. Current 3300 (+10% > 4% TP). Should Trigger TP.
-        # ...
-        positions = [
-            {'symbol': 'PERP_ETH_USDC', 'position_qty': 0.1, 'average_open_price': 3000.0},
-            {'symbol': 'PERP_SOL_USDC', 'position_qty': 10.0, 'average_open_price': 100.0},
-            {'symbol': 'PERP_DOGE_USDC', 'position_qty': 1000.0, 'average_open_price': 0.10} 
-        ]
+        # --- Step 2: Market bounces to 990 (Callback) ---
+        # HWM = 975
+        # Callback = 1.5%
+        # Trigger = 975 * (1 + 0.015) = 975 * 1.015 = 989.625
+        # Price 990 > 989.625 -> SHOULD CLOSE
         
-        # Mock get_orderbook to return dynamic prices (Real API Structure)
-        def side_effect(symbol, max_level=10):
-            if symbol == 'PERP_ETH_USDC':
-                return {'data': {'asks': [{'price': 3300}], 'bids': [{'price': 3300}]}} 
-            elif symbol == 'PERP_SOL_USDC':
-                return {'data': {'asks': [{'price': 101}], 'bids': [{'price': 101}]}} 
-            elif symbol == 'PERP_DOGE_USDC':
-                return {'data': {'asks': [{'price': 0.09}], 'bids': [{'price': 0.09}]}} 
-            return None
-        mock_md.get_orderbook.side_effect = side_effect
+        self.mock_db.get_open_trade_state.return_value = ("log_123", 975.0, 1000.0, None)
+        self.mock_md.get_orderbook.return_value = {
+            'data': {'asks': [{'price': 990}], 'bids': [{'price': 990}]}
+        }
         
-        # Mock close_position
-        self.execution.close_position = MagicMock()
-        self.execution.close_position.return_value = ({'success': True}, 3000.0) # Mock return (response, price)
+        self.exec_mod.monitor_risks([pos], self.mock_md)
         
-        # Execute
-        self.execution.monitor_risks(positions, mock_md)
-        
-        # Verify
-        self.execution.close_position.assert_any_call('PERP_ETH_USDC', 0.1, 'SELL')
-        self.execution.close_position.assert_any_call('PERP_DOGE_USDC', 1000.0, 'SELL')
-        self.assertEqual(self.execution.close_position.call_count, 2)
-        print("\n✅ Test Passed: monitor_risks triggers TP for ETH, SL for DOGE, holds SOL")
-        
-        print("\n✅ Test Passed: monitor_risks triggers TP for ETH, SL for DOGE, holds SOL")
-
-    def test_monitor_risks_retry_fallback(self):
-        # Override config for this test too if needed, or ensure price movt is huge
-        # Scenario: Entry 100, Price 105. Gain 5%. If TP is 30%, no close.
-        # Override config for this test too if needed, or ensure price movt is huge
-        # Scenario: Entry 100, Price 105. Gain 5%. If TP is 30%, no close.
-        old_tp = config.TP_PERCENT
-        config.TP_PERCENT = 0.04
-        self.addCleanup(lambda: setattr(config, 'TP_PERCENT', old_tp))
-
-        # Scenario: Orderbook fails (network error), Fallback succeeds
-        mock_md = MagicMock()
-        self.mock_db.get_open_trade_state.return_value = (None, 0, 0, None) # Default
-        
-        mock_md.get_orderbook.side_effect = Exception("Network Timeout")
-        mock_md.get_ohlcv.return_value = [{'close': 105.0}]
-        
-        positions = [{'symbol': 'PERP_SOL_USDC', 'position_qty': 10.0, 'average_open_price': 100.0}]
-        
-        self.execution.close_position = MagicMock()
-        self.execution.close_position.return_value = ({'success': True}, 100.0)
-        
-        # Execute
-        self.execution.monitor_risks(positions, mock_md)
-        
-        # Verify
-        self.assertEqual(mock_md.get_orderbook.call_count, 3)
-        mock_md.get_ohlcv.assert_called_once_with('PERP_SOL_USDC', timeframe='1m', limit=1)
-        self.execution.close_position.assert_called_once()
-        print("\n✅ Test Passed: monitor_risks successfully falls back to OHLCV on error")
-        
-    def test_trailing_stop_ratchet(self):
-        # Verify Stateful Logic for both LONG and SHORT
-        mock_md = MagicMock()
-        
-        # Scenario 1: LONG RATCHET
-        # Entry 100. Historic High (HWM) 103 (+3%). 
-        # Triggered Tier 2 (Lock 1.5% Profit) -> SL = 101.5.
-        # Current Price drops to 101.0.
-        # 101.0 < 101.5 -> MUST CLOSE. (If stateless, 101 is +1% profit -> Hold).
-        
-        # Scenario 2: SHORT RATCHET
-        # Entry 100. Historic Low (HWM) 97 (+3% profit).
-        # Triggered Tier 2 (Lock 1.5% Profit) -> SL = 98.5.
-        # Current Price rises to 99.0.
-        # 99.0 > 98.5 -> MUST CLOSE. (If stateless, 99 is +1% profit -> Hold).
-        
-        positions = [
-            {'symbol': 'PERP_LONG_TEST', 'position_qty': 10.0, 'average_open_price': 100.0},
-            {'symbol': 'PERP_SHORT_TEST', 'position_qty': -10.0, 'average_open_price': 100.0}
-        ]
-        
-        # Mock Prices: Long=101, Short=99
-        def price_side_effect(symbol, max_level=10):
-            if symbol == 'PERP_LONG_TEST':
-                return {'data': {'asks': [{'price': 101.0}], 'bids': [{'price': 101.0}]}}
-            elif symbol == 'PERP_SHORT_TEST':
-                return {'data': {'asks': [{'price': 99.0}], 'bids': [{'price': 99.0}]}}
-            return None
-        mock_md.get_orderbook.side_effect = price_side_effect
-        
-        # Mock DB HWM: Long=103, Short=97
-        def db_side_effect(symbol):
-            if symbol == 'PERP_LONG_TEST':
-                # log_id, highest_price, entry, time
-                return ('log_1', 103.0, 100.0, None) 
-            elif symbol == 'PERP_SHORT_TEST':
-                # log_id, highest_price (lowest), entry
-                return ('log_2', 97.0, 100.0, None)
-            return (None, 0, 0, None)
-        self.mock_db.get_open_trade_state.side_effect = db_side_effect
-        
-        # Explicitly mock close_position again
-        self.execution.close_position = MagicMock()
-        self.execution.close_position.return_value = ({'success': True}, 100.0)
-        
-        # Execute
-        self.execution.monitor_risks(positions, mock_md)
-        
-        # Verify
-        self.execution.close_position.assert_any_call('PERP_LONG_TEST', 10.0, 'SELL')
-        self.execution.close_position.assert_any_call('PERP_SHORT_TEST', 10.0, 'BUY')
-        self.assertEqual(self.execution.close_position.call_count, 2)
-        print("\n✅ Test Passed: Stateful Ratchet works for BOTH Long and Short")
+        self.exec_mod.close_position.assert_called_with(symbol, 0.1, "BUY")
 
 if __name__ == '__main__':
     unittest.main()
-

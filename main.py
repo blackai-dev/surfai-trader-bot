@@ -23,51 +23,39 @@ def run_bot():
     db = DatabaseHandler()
 
     # Initialize Modules
+    # Initialize Modules
     md = MarketData()
     ai = AIAnalyst()
     exec_mod = Execution(md.client, db_handler=db)
     
+    # NEW: Initialize Notifier
+    from notifier import TelegramNotifier
+    notifier = TelegramNotifier()
+    notifier.send_message("🤖 **Orderly Bot Started**\nWaiting for ticks...")
 
     # --- Startup Checks ---
     print("\n🔎 Doing Startup Checks...")
     
-    # 1. Check Balance
+    # 1. Check Balance & Equity
     usdc_balance = 0.0
-    wallet = md.client.get_current_holdings() # Using verified method name
+    wallet = md.client.get_current_holdings()
     if wallet and 'data' in wallet and 'holding' in wallet['data']:
          for asset in wallet['data']['holding']:
             if asset['token'] == 'USDC':
                 usdc_balance = float(asset['holding'])
-    
-    # 2. Check Existing Positions & Equity
-    has_position = False
-    startup_pos = md.get_positions()
-    total_unrealized_pnl = 0.0 # Initialize for fallback or display
 
-    if startup_pos and 'data' in startup_pos and 'rows' in startup_pos['data']:
-        rows = startup_pos['data']['rows']
-        
-        # Calculate PnL for Equity display
+    startup_pos = md.get_positions()
+    net_equity = usdc_balance
+    total_unrealized_pnl = 0.0
+    
+    if startup_pos and 'data' in startup_pos:
         # Official 'total_collateral_value' includes Settled + Unsettled PnL
         if 'total_collateral_value' in startup_pos['data']:
             net_equity = float(startup_pos['data']['total_collateral_value'])
-            # If using total_collateral_value, we don't have a separate total_unrealized_pnl from this source
-            # We can try to calculate it for display if needed, but for now, it's 0 if not explicitly provided.
-            # For display purposes, we might still want to calculate it from active_rows if total_collateral_value is used.
-            # Let's keep the original PnL calculation for display consistency if total_collateral_value is present.
-            active_rows = [r for r in rows if float(r.get('position_qty', 0)) != 0]
-            for r in active_rows:
-                 pnl = float(r.get('unrealized_pnl', 0))
-                 if pnl == 0 and float(r.get('position_qty', 0)) != 0:
-                     mark = float(r.get('mark_price', 0))
-                     avg = float(r.get('average_open_price', 0))
-                     qty = float(r.get('position_qty', 0))
-                     if mark and avg:
-                         pnl = (mark - avg) * qty if qty > 0 else (avg - mark) * abs(qty)
-                 total_unrealized_pnl += pnl
-        else:
-            # Fallback (Manual Sum - flawed if ignoring unsettled)
-            net_equity = usdc_balance 
+        
+        # Calculate PnL for display context
+        if 'rows' in startup_pos['data']:
+            rows = startup_pos['data']['rows']
             active_rows = [r for r in rows if float(r.get('position_qty', 0)) != 0]
             for r in active_rows:
                  pnl = float(r.get('unrealized_pnl', 0))
@@ -79,21 +67,9 @@ def run_bot():
                          if qty > 0: pnl = (mark - avg) * qty
                          else: pnl = (avg - mark) * abs(qty)
                  total_unrealized_pnl += pnl
-            net_equity += total_unrealized_pnl
 
-        print(f"💰 Balance: {usdc_balance:.2f} USDC | Net Equity: {net_equity:.2f} USDC (Unreal PnL: {total_unrealized_pnl:+.2f})")
+    print(f"💰 Balance: {usdc_balance:.2f} USDC | Net Equity: {net_equity:.2f} USDC (Unreal PnL: {total_unrealized_pnl:+.2f})")
 
-        # Check for active positions (re-evaluate active_rows if not already done in the 'if' block)
-        if 'active_rows' not in locals(): # Ensure active_rows is defined for the following block
-            active_rows = [r for r in rows if float(r.get('position_qty', 0)) != 0]
-
-        if active_rows:
-            print(f"⚠️ Found {len(active_rows)} existing positions. Running immediate risk check...")
-            exec_mod.monitor_risks(active_rows, md)
-            has_position = True
-
-    if has_position:
-        print("➡️ Risk check complete. Entering main loop...")
 
     # State for Multi-Token Analysis
     top_10_list = []
@@ -113,6 +89,96 @@ def run_bot():
             current_time = time.time()
             print(f"\n⏰ Tick: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time))}")
             
+            # --- -1. Check Remote Commands (DB) ---
+            # Protocol: DB is the source of truth for controls
+            is_paused_str = db.get_config("is_paused", "false")
+            if is_paused_str == "true":
+                print("⏸️ Bot is PAUSED by remote command.")
+                # We still run Risk Monitor (monitor_risks) below, but skip Analysis
+                pass 
+            
+            # Sync Position Size
+            size_str = db.get_config("position_size", "30.0")
+            try:
+                config.POSITION_SIZE_USDC = float(size_str)
+            except:
+                pass
+
+            # --- -2. Process Remote Command Queue (Phase 2) ---
+            pending_cmds = db.get_pending_commands()
+            for cmd in pending_cmds:
+                cmd_id, command, params = cmd
+                print(f"📥 Processing Remote Command: {command} {params}")
+                
+                if command == "CLOSE_POSITION":
+                    target_symbol = params.get('symbol')
+                    # Find quantity from active positions
+                    # Only if we have current_positions populated (might need to fetch if not yet done)
+                    # To be safe, fetch specific position
+                    try:
+                        pos_info = md.client.get_one_position_info(target_symbol)
+                        if pos_info and 'data' in pos_info:
+                            qty = float(pos_info['data'].get('position_qty', 0))
+                            if qty != 0:
+                                side = "SELL" if qty > 0 else "BUY"
+                                exec_mod.close_position(target_symbol, abs(qty), side)
+                                notifier.send_message(f"✅ **Remote Close Executed**: {target_symbol}")
+                            else:
+                                notifier.send_message(f"⚠️ **Remote Close Failed**: No open position for {target_symbol}")
+                    except Exception as e:
+                        print(f"❌ Failed to execute remote close: {e}")
+                
+                elif command == "FORCE_ANALYZE":
+                    print("🧠 Processing Force Audit Command...")
+                    try:
+                        # Fetch fresh positions
+                        p_resp = md.get_positions()
+                        if p_resp and 'data' in p_resp and 'rows' in p_resp['data']:
+                            p_rows = p_resp['data']['rows']
+                            active_p = [p for p in p_rows if float(p.get('position_qty', 0)) != 0]
+                            if active_p:
+                                notifier.send_message(f"🧠 **Auditing {len(active_p)} Positions...**")
+                                exec_mod.audit_positions(active_p, md, ai, force=True)
+                            else:
+                                notifier.send_message("⚠️ No active positions to audit.")
+                    except Exception as e:
+                        print(f"❌ Force Audit Error: {e}")
+                
+                elif command == "CLOSE_ALL":
+                    print("🚨 Processing PANIC CLOSE ALL...")
+                    # 1. Pause Bot
+                    db.set_config("is_paused", "true")
+                    is_paused_str = "true" # Update local state immediately
+                    notifier.send_message("⏸️ **Bot PAUSED by Panic Protocol**")
+                    
+                    # 2. Close All
+                    try:
+                        p_resp = md.get_positions()
+                        if p_resp and 'data' in p_resp and 'rows' in p_resp['data']:
+                            p_rows = p_resp['data']['rows']
+                            active_p = [p for p in p_rows if float(p.get('position_qty', 0)) != 0]
+                            
+                            if not active_p:
+                                notifier.send_message("✅ No active positions to close.")
+                            else:
+                                count = 0
+                                for p in active_p:
+                                    sym = p['symbol']
+                                    qty = float(p['position_qty'])
+                                    side = "SELL" if qty > 0 else "BUY"
+                                    
+                                    print(f"🚨 Panic Closing {sym} ({qty})...")
+                                    exec_mod.close_position(sym, abs(qty), side)
+                                    count += 1
+                                    
+                                notifier.send_message(f"✅ **Panic Complete**: Closed {count} positions.")
+                    except Exception as e:
+                        print(f"❌ Panic Close Failed: {e}")
+                        notifier.send_message(f"❌ **Panic Failed**: {e}")
+
+                # Mark Complete
+                db.mark_command_completed(cmd_id)
+
             # --- 0. Update Top 10 List (Periodically) ---
             if config.ENABLE_TOP_10:
                 if current_time - last_scan_time > SCAN_INTERVAL or not top_10_list:
@@ -152,17 +218,24 @@ def run_bot():
                         print(f"⚠️ Failed to fetch price for zombie {sym}: {e}")
                     
                     db.close_zombie_trade(sym, est_price)
+                    # Notify
+                    notifier.send_message(f"🧹 **Zombie Trade Closed**: {sym}\nPrice: {est_price}")
             
-            # --- RISK MONITOR (Multi-Token) ---
             # --- RISK MONITOR (Multi-Token) ---
             # Check risks for ALL active positions at once
             exec_mod.monitor_risks(current_positions, md)
             
+            # --- IF PAUSED, SKIP ANALYSIS ---
+            if is_paused_str == "true":
+                print("💤 Paused... skipping analysis.")
+                time.sleep(POLL_INTERVAL)
+                continue
+
             # --- STALE POSITION CHECK (Cognitive Layer) ---
             # Periodically ask AI to review old trades
             if current_time - last_stale_check_time >= STALE_CHECK_INTERVAL:
                 print("🧠 Running Stale Position AI Check...")
-                exec_mod.check_stale_positions(current_positions, md, ai)
+                exec_mod.audit_positions(current_positions, md, ai, force=False)
                 last_stale_check_time = current_time
             
             # --- 2. Iterate Through Target Symbols ---
@@ -208,6 +281,16 @@ def run_bot():
                                 db.log_signal(symbol, signal, inds)
                                 
                                 print(f"💡 {symbol} Signal: {signal.get('action')} (Conf: {signal.get('confidence')})")
+                                
+                                # Notify Signal
+                                notifier.send_message(
+                                    f"🧠 **AI Signal Generated**\n"
+                                    f"Symbol: `{symbol}`\n"
+                                    f"Action: **{signal.get('action')}**\n"
+                                    f"Confidence: {signal.get('confidence')}\n"
+                                    f"Reason: _{signal.get('reasoning')}_"
+                                )
+                                
                                 if exec_mod.validate_signal(signal):
                                     exec_mod.execute_trade(signal, symbol)
                                     # Update active count locally to prevent over-trading in same tick

@@ -40,6 +40,24 @@
 ![Live Execution Demo](screenshot_demo.png)
 *圖：機器人於終端機監控多個幣種 (BTC/SOL/S) 的持倉狀態，即時計算 PnL 與動態止損位。*
 
+### 6. 📱 Telegram 遙控與監控 (New)
+
+支援透過 Telegram 進行遠端管理，無需登入伺服器即可掌握機器人狀態。
+
+![Telegram Bot Demo](tg_bot_demo.png)
+*圖：Telegram Bot 互動介面，支援指令控制與即時狀態查詢。*
+
+- **控制指令**:
+  - `/start` / `/stop`: 一鍵暫停或恢復機器人交易 (Panic Button)。
+  - `/set_size [amount]`: 動態調整下單金額 (USDC)。
+  - `/close [symbol]`: 強制平倉指定幣種。
+  - `/close_all`: **緊急全平倉** 並暫停機器人。
+- **監控指令**:
+  - `/status`: 查看目前持倉、浮動盈虧 (PnL) 與 HWM 狀態。
+  - `/pnl`: 繪製歷史損益曲線圖。
+  - `/signals`: 查看最近的 AI 分析訊號與信心分數。
+  - `/audit`: 強制觸發 AI 審計 (Stale Check)。
+
 ---
 
 ## 🛡️ 雙軌制風控策略 (Dual-Track Risk Management) **[NEW]**
@@ -161,7 +179,21 @@ DB_USER="<DB_USER>"
 DB_PASSWORD="<DB_PASSWORD>"
 DB_HOST="localhost"
 DB_PORT="5432"
+
+# Telegram Config (Optional)
+TELEGRAM_BOT_TOKEN="<YOUR_BOT_TOKEN>" # Get from @BotFather
+TELEGRAM_CHAT_ID="<YOUR_CHAT_ID>"     # Get from @userinfobot
 ```
+
+#### 如何取得 Telegram 設定？
+1.  **BOT_TOKEN**:
+    - 在 Telegram 搜尋 **@BotFather**。
+    - 輸入 `/newbot` 並依指示建立機器人。
+    - 複製它給您的 `HTTP API Token`。
+2.  **CHAT_ID**:
+    - 在 Telegram 搜尋 **@userinfobot**。
+    - 點擊 Start，它會回傳您的 `Id` (一串數字，如 `123456789`)。
+
 
 ### 3. 啟動機器人
 
@@ -171,14 +203,28 @@ DB_PORT="5432"
 chmod +x run.sh
 ./run.sh
 ```
+或是手動執行
+```bash
+python3 main.py
+```
 
-### 4. 啟動監控儀表板
+### 4. 啟動 TG Bot 可以遠端從 TG 控制
+
+另開一個終端機視窗：
+
+```bash
+python3 tg_bot.py
+```
+
+### 5. 啟動監控儀表板（如果需要）
 
 另開一個終端機視窗：
 
 ```bash
 streamlit run dashboard.py
 ```
+
+---
 
 ## ⚠️ 重要機制說明
 
